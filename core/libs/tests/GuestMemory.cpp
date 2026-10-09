@@ -99,6 +99,32 @@ static void CheckReleaseFlexibleMemory() {
     Require(sceKernelMunmap(again, length) == 0);
 }
 
+static void CheckUnmapAcrossHoles() {
+    constexpr std::size_t page = 0x4000;
+    const auto failed = reinterpret_cast<void*>(static_cast<std::uintptr_t>(-1));
+    for (const std::size_t hole : {page, page * 2}) {
+        auto* memory = static_cast<unsigned char*>(mmap_nid_postfix(nullptr, page * 3, 3, 0x1002, -1, 0));
+        Require(memory != failed);
+        Require(mprotect_nid_postfix(memory, page, 1) == 0);
+        Require(munmap_nid_postfix(memory + hole, page) == 0);
+        Require(munmap_nid_postfix(memory, page * 3) == 0);
+        GuestAllocations::Mutation mutation;
+        Require(!mutation.Overlaps(memory, page * 3));
+    }
+    auto* memory = static_cast<unsigned char*>(mmap_nid_postfix(nullptr, page * 3, 3, 0x1002, -1, 0));
+    Require(memory != failed);
+    memory[0] = 42;
+    Require(munmap_nid_postfix(memory + page, page) == 0);
+    Require(munmap_nid_postfix(memory + page, page * 2) == 0);
+    Require(memory[0] == 42);
+    {
+        GuestAllocations::Mutation mutation;
+        Require(mutation.Covers(memory, page));
+        Require(!mutation.Overlaps(memory + page, page * 2));
+    }
+    Require(munmap_nid_postfix(memory, page) == 0);
+}
+
 static void CheckNamedAndHintedMappings() {
     constexpr std::size_t length = 0x10000;
     void* first = nullptr;
@@ -1064,6 +1090,7 @@ static void CheckDirectMemoryWriteWatch() {
 
 int main() {
     CheckReleaseFlexibleMemory();
+    CheckUnmapAcrossHoles();
     CheckNamedAndHintedMappings();
     CheckInternalNamedFlexibleMapping();
     CheckBatchMapStopsAtInvalidEntry();
