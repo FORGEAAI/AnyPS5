@@ -97,15 +97,25 @@ def pe_exports(path, data):
         raise AuditError(f"{path}: RVA 0x{address:x} is not inside any section")
 
     table = unpack("<IIHHIIIIIII", data, to_offset(rva, 40), path, "export directory")
-    name_count, names_rva = table[7], table[9]
+    address_count, name_count, addresses_rva, names_rva, ordinals_rva = table[6:11]
     names = set()
     if not name_count:
         return names
+    if not address_count:
+        raise AuditError(f"{path}: PE named exports have an empty export address table")
+    addresses_offset = to_offset(addresses_rva, address_count * 4)
     names_offset = to_offset(names_rva, name_count * 4)
+    ordinals_offset = to_offset(ordinals_rva, name_count * 2)
     for index in range(name_count):
+        ordinal = unpack("<H", data, ordinals_offset + index * 2, path, "export ordinal")[0]
+        if ordinal >= address_count:
+            raise AuditError(f"{path}: export ordinal index {ordinal} exceeds the export address table ({address_count} entries)")
+        target = unpack("<I", data, addresses_offset + ordinal * 4, path, "export target RVA")[0]
         name_rva = unpack("<I", data, names_offset + index * 4, path, "export name RVA")[0]
         offset = to_offset(name_rva, 1)
-        names.add(cstring(data, offset, len(data), path, "export name"))
+        name = cstring(data, offset, len(data), path, "export name")
+        if target:
+            names.add(name)
     return names
 
 

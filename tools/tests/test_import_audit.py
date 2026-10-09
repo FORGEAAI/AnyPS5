@@ -47,12 +47,15 @@ def exporting(*names):
 def build_pe(names):
     section_rva, raw_offset = 0x1000, 0x200
     strings, rvas = b"", []
-    start = 40 + 4 * len(names)
+    start = 40 + 10 * len(names)
     for name in names:
         rvas.append(section_rva + start + len(strings))
         strings += name.encode() + b"\0"
-    raw = struct.pack("<IIHHIIIIIII", 0, 0, 0, 0, 0, 1, len(names), len(names), 0, section_rva + 40, 0)
-    raw += b"".join(struct.pack("<I", rva) for rva in rvas) + strings
+    raw = struct.pack("<IIHHIIIIIII", 0, 0, 0, 0, 0, 1, len(names), len(names),
+                      section_rva + 40, section_rva + 40 + 4 * len(names), section_rva + 40 + 8 * len(names))
+    raw += b"".join(struct.pack("<I", 0x2000 + index * 16) for index in range(len(names)))
+    raw += b"".join(struct.pack("<I", rva) for rva in rvas)
+    raw += b"".join(struct.pack("<H", index) for index in range(len(names))) + strings
     image = bytearray(raw_offset)
     image[0:2] = b"MZ"
     image[0x3c:0x40] = struct.pack("<I", 0x40)
@@ -203,6 +206,45 @@ class ImportAuditTests(unittest.TestCase):
         for cut in (0x3c, 0x60, 0x210):
             with self.assertRaisesRegex(import_audit.AuditError, "lib.prx"):
                 import_audit.pe_exports(path, image[:cut])
+
+    def test_pe_reader_uses_unbiased_ordinals_and_skips_empty_slots(self):
+        image = bytearray(build_pe(["alpha", "beta", "gamma"]))
+        struct.pack_into("<I", image, 0x200 + 16, 37)
+        struct.pack_into("<III", image, 0x200 + 40, 0, 0x2010, 0x2020)
+        struct.pack_into("<HHH", image, 0x200 + 64, 2, 0, 2)
+        self.assertEqual(import_audit.pe_exports(Path("lib.prx"), image), {"alpha", "gamma"})
+
+    def test_pe_reader_rejects_invalid_export_tables(self):
+        for offset, layout, value in ((0x200 + 48, "<H", 1), (0x200 + 20, "<I", 0),
+                                       (0x200 + 28, "<I", 0x3000), (0x200 + 36, "<I", 0x3000)):
+            with self.subTest(offset=offset, value=value):
+                image = bytearray(build_pe(["alpha"]))
+                struct.pack_into(layout, image, offset, value)
+                with self.assertRaisesRegex(import_audit.AuditError, "lib.prx"):
+                    import_audit.pe_exports(Path("lib.prx"), image)
+
+    def test_pe_missing_export_does_not_pass_the_audit(self):
+        work = self.work
+        image = bytearray(build_pe(["AAAAAAAAAAA"]))
+        struct.pack_into("<I", image, 0x200 + 40, 0)
+        (work.libs / "libSceA.prx").write_bytes(image)
+        registry = work.root / "game.json"
+        write_registry(registry, [("AAAAAAAAAAA", "libSceA.prx")])
+        result = work.root / "audit.json"
+        code, _, err = work.run(registry, "--json", str(result))
+        self.assertEqual((code, err), (1, ""))
+        self.assertEqual(json.loads(result.read_text())["imports"][0]["class"], "absent")
+
+    def test_pe_invalid_ordinal_exits_two(self):
+        work = self.work
+        image = bytearray(build_pe(["AAAAAAAAAAA"]))
+        struct.pack_into("<H", image, 0x200 + 48, 1)
+        (work.libs / "libSceA.prx").write_bytes(image)
+        registry = work.root / "game.json"
+        write_registry(registry, [("AAAAAAAAAAA", "libSceA.prx")])
+        code, out, err = work.run(registry)
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("libSceA.prx", err)
 
     def test_library_directories(self):
         work = self.work
